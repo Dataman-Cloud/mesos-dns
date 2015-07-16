@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+        "io/ioutil"
 	"net"
 	"net/http"
 	"strconv"
@@ -43,6 +44,32 @@ type Resolver struct {
 	extResolver func(r *dns.Msg, nameserver string, proto string, cnt int) (*dns.Msg, error)
 	// pluggable ZK detection, mainly for unit testing
 	startZKdetection func(zkurl string, leaderChanged func(string)) error
+}
+
+type FrameWorks struct {
+        Fw []FrameWork `json:"frameworks"`
+        Cluster string `json:"cluster"`
+}
+
+type FrameWork struct {
+        Name string `json:name`
+        Tasks []Task `json:"tasks"`
+}
+
+type Task struct {
+        Name string `json:"name"`
+        State string `json:"state"`
+}
+
+type MesosTasks struct {
+    MesosTasks []MesosTask `json:"tasks"`
+}
+
+type MesosTask struct {
+    Host string `json:"host"`
+    Ip string `json:"ip"`
+    Port string `json:"port"`
+    Service string `json:"service"`
 }
 
 func New(version string, config records.Config) *Resolver {
@@ -493,6 +520,7 @@ func (res *Resolver) configureHTTP() {
 	ws.Route(ws.GET("/v1/hosts/{host}").To(res.RestHost))
 	ws.Route(ws.GET("/v1/hosts/{host}/ports").To(res.RestPorts))
 	ws.Route(ws.GET("/v1/services/{service}").To(res.RestService))
+	ws.Route(ws.GET("/v1/tasks").To(res.RestTask))
 	restful.Add(ws)
 }
 
@@ -587,6 +615,62 @@ func (res *Resolver) RestHost(req *restful.Request, resp *restful.Response) {
 // Reports Mesos-DNS version through http interface
 func (res *Resolver) RestPorts(req *restful.Request, resp *restful.Response) {
 	io.WriteString(resp, "To be implemented...")
+}
+
+func (res *Resolver) RestTask(req *restful.Request, resp *restful.Response) {
+        url := "http://" + res.leader + "/state.json"
+        reqm, err := http.NewRequest("GET", url, nil)
+	reqm.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	respm, err := client.Do(reqm)
+	if err != nil {
+		logging.Error.Println(err)
+	}
+	defer respm.Body.Close()
+
+	body, err := ioutil.ReadAll(respm.Body)
+	if err != nil {
+		logging.Error.Println(err)
+	}
+        s := string(body)
+        var part FrameWorks
+        m1 := make(map[string]string)
+        if err := json.Unmarshal([]byte(s), &part); err == nil {
+                //fmt.Println("================json str 转struct==")
+                if len(part.Fw) > 0 {
+                        for i := 0; i < len(part.Fw); i++ {
+                                if len(part.Fw[i].Tasks) > 0 {
+                                        for x := 0; x < len(part.Fw[i].Tasks); x++ {
+                                                m1[part.Fw[i].Tasks[x].Name] = part.Fw[i].Name
+                                        }
+                                }
+                        }
+                }
+        }
+        sl := make([]string, len(m1))
+        num := 0
+        for k, v := range m1 {
+                dnsurl := "http://127.0.0.1:" + fmt.Sprintf("%d", res.config.HttpPort) + "/v1/services/_" + k + "._tcp." + v + ".mesos"
+                reqd, err := http.NewRequest("GET", dnsurl, nil)
+                reqd.Header.Set("Content-Type", "application/json")
+                clientd := &http.Client{}
+                respd, err := clientd.Do(reqd)
+                if err != nil {
+                        logging.Error.Println(err)
+                }
+                defer respd.Body.Close()
+                bodyd, err := ioutil.ReadAll(respd.Body)
+                if err != nil {
+                        logging.Error.Println(err)
+                }
+                bodystr := "{\"" + k + "\":" + string(bodyd) + "}"
+                sl[num] = bodystr
+                num = num + 1
+
+        }
+        output := "{\"tasks\": [" + strings.Join(sl, ", ") + "]}"
+        io.WriteString(resp, output)
 }
 
 // Reports Mesos-DNS version through http interface
